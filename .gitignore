@@ -1,0 +1,11 @@
+# API Keys und Secrets
+.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Mac OS Systemdateien
+.DS_Store
+EOT
