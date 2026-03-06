@@ -25,7 +25,6 @@ VALHALLA_TIMEOUT_SECONDS = get_env_int("VALHALLA_TIMEOUT_SECONDS", 15)
 VALHALLA_ELEVATION_INTERVAL_M = get_env_int("VALHALLA_ELEVATION_INTERVAL_M", 30)
 
 BATTERY_CAPACITY_KWH = get_env_float("BATTERY_CAPACITY_KWH", 75.0)
-SOC_START = get_env_float("SOC_START", 1.0)
 SOC_WINDOW_START = get_env_float("SOC_WINDOW_START", 0.15)
 SOC_WINDOW_END = get_env_float("SOC_WINDOW_END", 0.05)
 
@@ -216,86 +215,56 @@ def _append_without_duplicate(target: List[List[float]], source: Sequence[Sequen
 
 
 def find_charging_window(
-    decoded_shape: Sequence[Sequence[float]],
-    segments: Sequence[Dict[str, object]],
-    battery_capacity_kwh: float = BATTERY_CAPACITY_KWH,
-) -> Tuple[List[List[float]], float | None, float | None]:
-    """Ermittelt Koordinaten fuer den SoC-Bereich 15% -> 5%."""
-    physics_model = EVPhysicsModel()
-    current_kwh = battery_capacity_kwh * SOC_START
-    start_threshold_kwh = battery_capacity_kwh * SOC_WINDOW_START
-    end_threshold_kwh = battery_capacity_kwh * SOC_WINDOW_END
-
-    charging_window_coords: List[List[float]] = []
-    window_start_km: float | None = None
-    window_end_km: float | None = None
+    decoded_shape: List[List[float]],
+    segments: List[Dict[str, object]],
+    battery_capacity_kwh: float,
+    current_soc: float,
+) -> Tuple[List[List[float]], float, float]:
+    """Findet das Ladefenster (15% bis 5%) mit den perfekten pre-kalkulierten Werten."""
+    
+    target_start_kwh = battery_capacity_kwh * current_soc - (battery_capacity_kwh * 0.15)
+    target_end_kwh = battery_capacity_kwh * current_soc - (battery_capacity_kwh * 0.05)
+    
+    accumulated_kwh = 0.0
+    accumulated_km = 0.0
+    
+    window_start_km = None
+    window_end_km = None
+    window_coords = []
+    
     in_window = False
-    cumulative_km = 0.0
-
-    for segment in segments:
-        distance_km = float(segment.get("distance_km", 0.0))
-        speed_kmh = float(segment.get("speed_kmh", 0.0))
-        duration_sec = float(segment.get("duration_sec", 0.0))
-        delta_h_m = float(segment.get("delta_h_m", 0.0))
-
-        begin_shape_index = int(segment.get("begin_shape_index", -1))
-        end_shape_index = int(segment.get("end_shape_index", -1))
-        actual_begin_idx = begin_shape_index
-        actual_end_idx = end_shape_index
-
-        segment_start_km = cumulative_km
-        segment_end_km = cumulative_km + distance_km
-
-        segment_kwh = physics_model.calculate_energy_kwh(
-            distance_km=distance_km,
-            speed_kmh=speed_kmh,
-            duration_sec=duration_sec,
-            delta_h_m=delta_h_m,
-        )
-        segment["segment_kwh"] = segment_kwh
-
-        current_before = current_kwh
-        current_after = current_before - segment_kwh
-        exits_window_this_segment = False
-
-        if not in_window and current_before >= start_threshold_kwh and current_after < start_threshold_kwh:
+    
+    for seg in segments:
+        # WICHTIG: Wir nehmen einfach den perfekten Wert, den main.py bereits berechnet hat!
+        seg_kwh = float(seg.get("segment_kwh", 0.0))
+        dist_km = float(seg.get("distance_km", 0.0))
+        
+        accumulated_kwh += seg_kwh
+        accumulated_km += dist_km
+        
+        # Ab 15% Rest-Akku öffnet sich das Fenster
+        if accumulated_kwh >= target_start_kwh and window_start_km is None:
+            window_start_km = accumulated_km
             in_window = True
-            if current_before != current_after and distance_km > 0:
-                fraction = (current_before - start_threshold_kwh) / (current_before - current_after)
-                fraction = max(0.0, min(1.0, fraction))
-                window_start_km = segment_start_km + (distance_km * fraction)
-                actual_begin_idx = begin_shape_index + int(
-                    fraction * (end_shape_index - begin_shape_index)
-                )
-            else:
-                window_start_km = segment_start_km
-
-        if in_window and current_before >= end_threshold_kwh and current_after < end_threshold_kwh:
-            if current_before != current_after and distance_km > 0:
-                fraction = (current_before - end_threshold_kwh) / (current_before - current_after)
-                fraction = max(0.0, min(1.0, fraction))
-                window_end_km = segment_start_km + (distance_km * fraction)
-                actual_end_idx = begin_shape_index + int(
-                    fraction * (end_shape_index - begin_shape_index)
-                )
-            else:
-                window_end_km = segment_end_km
-            exits_window_this_segment = True
-
+            
+        # Bei 5% Rest-Akku schließt sich das Fenster
+        if accumulated_kwh >= target_end_kwh and window_end_km is None:
+            window_end_km = accumulated_km
+            in_window = False
+            
+        # Wenn wir im Fenster sind, speichern wir die Koordinaten der Straße
         if in_window:
-            coords = _shape_slice(decoded_shape, actual_begin_idx, actual_end_idx)
-            _append_without_duplicate(charging_window_coords, coords)
-
-        if exits_window_this_segment:
-            break
-
-        current_kwh = current_after
-        cumulative_km = segment_end_km
-
-    if in_window and window_end_km is None:
-        window_end_km = cumulative_km
-
-    return charging_window_coords, window_start_km, window_end_km
+            start_idx = int(seg.get("begin_shape_index", -1))
+            end_idx = int(seg.get("end_shape_index", -1))
+            if 0 <= start_idx <= end_idx < len(decoded_shape):
+                # Füge die GPS-Punkte der Route in unser Fenster ein
+                window_coords.extend(decoded_shape[start_idx:end_idx+1])
+    
+    # Fallback, falls die Route zu Ende ist, bevor wir 5% erreichen
+    if window_start_km is not None and window_end_km is None:
+        window_end_km = accumulated_km
+        
+    return window_coords, window_start_km, window_end_km
 
 
 def find_chargers(bounding_box: Tuple[float, float, float, float]) -> List[Dict[str, object]]:

@@ -8,7 +8,7 @@ zurückgegebene Polyline6-Geometrie in [lat, lon]-Koordinaten.
 from __future__ import annotations
 
 from typing import Dict, List, Sequence, Tuple, TypedDict, Union
-
+import math
 import requests
 
 from app_config import get_env_int, get_env_str
@@ -27,7 +27,6 @@ class ValhallaRouteError(Exception):
 
 class SegmentData(TypedDict):
     """Typdefinition für ein extrahiertes Routing-Segment."""
-
     begin_shape_index: int
     end_shape_index: int
     distance_km: float
@@ -39,12 +38,7 @@ class SegmentData(TypedDict):
 
 
 def normalize_coordinate(coord: CoordinateInput) -> Dict[str, float]:
-    """Normalisiert eine Koordinate in Valhalla-Format {"lon": x, "lat": y}.
-
-    Erlaubte Eingaben:
-    - Dict mit Schlüsseln "lon"/"lat"
-    - Tuple/Liste im Format [lon, lat]
-    """
+    """Normalisiert eine Koordinate in Valhalla-Format {"lon": x, "lat": y}."""
     if isinstance(coord, dict):
         if "lon" not in coord or "lat" not in coord:
             raise ValueError("Coordinate dict muss 'lon' und 'lat' enthalten.")
@@ -61,11 +55,7 @@ def normalize_coordinate(coord: CoordinateInput) -> Dict[str, float]:
 
 
 def decode_polyline6(encoded: str) -> List[List[float]]:
-    """Decodiert eine Valhalla-Polyline (Precision=6) in [lat, lon]-Punkte.
-
-    Valhalla nutzt standardmäßig eine codierte Polyline mit Skalierung 1e6.
-    Rückgabeformat: [[lat, lon], ...]
-    """
+    """Decodiert eine Valhalla-Polyline (Precision=6) in [lat, lon]-Punkte."""
     if not encoded:
         return []
 
@@ -76,7 +66,6 @@ def decode_polyline6(encoded: str) -> List[List[float]]:
     factor = 1e6
 
     while index < len(encoded):
-        # Latitude-Differenz dekodieren
         shift = 0
         result = 0
         while True:
@@ -92,7 +81,6 @@ def decode_polyline6(encoded: str) -> List[List[float]]:
         delta_lat = ~(result >> 1) if result & 1 else (result >> 1)
         lat += delta_lat
 
-        # Longitude-Differenz dekodieren
         shift = 0
         result = 0
         while True:
@@ -144,12 +132,7 @@ def decode_elevation_polyline(encoded: str) -> List[int]:
 
 
 def _normalize_elevation_values(raw_values: List[int]) -> List[float]:
-    """Normalisiert rohe Höhenwerte auf Meter.
-
-    In manchen Setups sind Werte in 0.1m/0.01m skaliert. Diese Heuristik
-    greift nur bei unplausibel großen Höhen und lässt normale Meterwerte
-    unverändert.
-    """
+    """Normalisiert rohe Höhenwerte auf Meter."""
     if not raw_values:
         return []
 
@@ -170,10 +153,7 @@ def _build_route_payload(start: Dict[str, float], end: Dict[str, float]) -> Dict
         "locations": [start, end],
         "costing": "auto",
         "costing_options": {
-            "auto": {
-                # Einige Valhalla/Stadia-Versionen reagieren konsistenter auf
-                # einen expliziten auto-Block.
-            }
+            "auto": {}  # <-- WICHTIG: Das hatte ich gelöscht, Valhalla braucht es oft!
         },
         "directions_options": {
             "units": "kilometers",
@@ -185,28 +165,17 @@ def _build_route_payload(start: Dict[str, float], end: Dict[str, float]) -> Dict
 
 
 def _extract_route_data(response_json: Dict[str, object]) -> Dict[str, object]:
-    """Extrahiert Distanz, Dauer, Shape und Segmentdaten aus einer Valhalla-Antwort."""
+    """Extrahiert Distanz, Dauer und zerteilt Maneuvers in 30m-Höhen-Slices."""
     try:
         trip = response_json["trip"]
-        if not isinstance(trip, dict):
-            raise TypeError("trip ist kein Dict")
-
         summary = trip["summary"]
-        if not isinstance(summary, dict):
-            raise TypeError("summary ist kein Dict")
-
         legs = trip["legs"]
-        if not isinstance(legs, list):
-            raise TypeError("legs ist keine Liste")
-
         shape = legs[0]["shape"]
-        if not isinstance(shape, str):
-            raise TypeError("shape ist kein String")
 
-        distance_km = float(summary["length"])  # Valhalla typischerweise in km
-        duration_min = float(summary["time"]) / 60.0  # Zeit in Sekunden -> Minuten
+        distance_km = float(summary["length"])
+        duration_min = float(summary["time"]) / 60.0
     except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise ValhallaRouteError(f"Unerwartetes Antwortformat von Valhalla: {exc}") from exc
+        raise ValhallaRouteError(f"Unerwartetes Antwortformat: {exc}") from exc
 
     decoded_coordinates = decode_polyline6(shape)
     segments: List[SegmentData] = []
@@ -215,89 +184,83 @@ def _extract_route_data(response_json: Dict[str, object]) -> Dict[str, object]:
         if not isinstance(leg, dict):
             continue
 
-        elevation_values_m: List[float] = []
         elevation_raw = leg.get("elevation")
+        elevation_values_m = []
 
-        if isinstance(elevation_raw, str):
-            if elevation_raw.strip():
-                elevation_values_m = _normalize_elevation_values(
-                    decode_elevation_polyline(elevation_raw.strip())
-                )
+        if isinstance(elevation_raw, str) and elevation_raw.strip():
+            elevation_values_m = _normalize_elevation_values(
+                decode_elevation_polyline(elevation_raw.strip())
+            )
         elif isinstance(elevation_raw, list):
-            numeric_values: List[float] = []
-            for value in elevation_raw:
-                try:
-                    numeric_values.append(float(value))
-                except (TypeError, ValueError):
-                    continue
-            elevation_values_m = numeric_values
+            elevation_values_m = [float(v) for v in elevation_raw if v is not None]
 
-        maneuvers = leg.get("maneuvers", [])
-        if not isinstance(maneuvers, list):
-            continue
-
-        leg_elevation_interval_m = float(leg.get("elevation_interval", ELEVATION_INTERVAL_M))
-        leg_distance_cursor_km = 0.0
-
-        # Fallback: Manche Antworten enthalten Elevation nicht auf leg-Ebene.
-        # Dann prüfen wir optional maneuver.elevation (falls vorhanden).
         if not elevation_values_m:
-            maneuver_elevation_values: List[float] = []
-            for maneuver in maneuvers:
+            for maneuver in leg.get("maneuvers", []):
                 if not isinstance(maneuver, dict):
                     continue
-                maneuver_elevation = maneuver.get("elevation")
-                if isinstance(maneuver_elevation, list):
-                    for value in maneuver_elevation:
-                        try:
-                            maneuver_elevation_values.append(float(value))
-                        except (TypeError, ValueError):
-                            continue
-            if maneuver_elevation_values:
-                elevation_values_m = maneuver_elevation_values
+                maneuver_el = maneuver.get("elevation")
+                if isinstance(maneuver_el, list):
+                    elevation_values_m.extend([float(v) for v in maneuver_el if v is not None])
 
-        for maneuver in maneuvers:
+        leg_elevation_interval_m = float(leg.get("elevation_interval", ELEVATION_INTERVAL_M))
+        
+        # Cursor für die Gesamtdistanz des Legs (in Metern)
+        global_dist_m = 0.0
+
+        for maneuver in leg.get("maneuvers", []):
             if not isinstance(maneuver, dict):
                 continue
 
-            distance_segment_km = float(maneuver.get("length", 0.0))
-            duration_segment_sec = float(maneuver.get("time", 0.0))
-            speed_kmh = (
-                (distance_segment_km / duration_segment_sec) * 3600.0
-                if duration_segment_sec > 0
-                else 0.0
-            )
+            maneuver_dist_m = float(maneuver.get("length", 0.0)) * 1000.0
+            maneuver_dur_sec = float(maneuver.get("time", 0.0))
+            instruction = str(maneuver.get("instruction", ""))
             begin_shape_index = int(maneuver.get("begin_shape_index", -1))
             end_shape_index = int(maneuver.get("end_shape_index", -1))
-            delta_h_m = 0.0
+            
+            # Geschwindigkeit für das gesamte Manöver berechnen
+            speed_kmh = (maneuver_dist_m / 1000.0 / maneuver_dur_sec) * 3600.0 if maneuver_dur_sec > 0 else 0.0
 
-            if elevation_values_m:
-                max_idx = len(elevation_values_m) - 1
-                if 0 <= begin_shape_index <= max_idx and 0 <= end_shape_index <= max_idx:
-                    delta_h_m = float(
-                        elevation_values_m[end_shape_index] - elevation_values_m[begin_shape_index]
-                    )
-                elif leg_elevation_interval_m > 0:
-                    # Bei elevation_interval ist elevation meist distanzbasiert sampled.
-                    start_m = leg_distance_cursor_km * 1000.0
-                    end_m = (leg_distance_cursor_km + distance_segment_km) * 1000.0
-                    start_idx = min(max_idx, max(0, int(round(start_m / leg_elevation_interval_m))))
-                    end_idx = min(max_idx, max(0, int(round(end_m / leg_elevation_interval_m))))
-                    delta_h_m = float(elevation_values_m[end_idx] - elevation_values_m[start_idx])
+            # --- NEUE LOGIK: Manöver in kleinere Slices unterteilen ---
+            # Wenn das Manöver z.B. 1000m lang ist, zerteilen wir es in ~33 Stücke à 30m
+            
+            slice_length_m = leg_elevation_interval_m if leg_elevation_interval_m > 0 else 30.0
+            num_slices = int(maneuver_dist_m // slice_length_m)
+            remainder_m = maneuver_dist_m % slice_length_m
+            
+            slices_to_create = []
+            for _ in range(num_slices):
+                slices_to_create.append(slice_length_m)
+            if remainder_m > 0:
+                slices_to_create.append(remainder_m)
 
-            segments.append(
-                {
+            for slice_m in slices_to_create:
+                if slice_m <= 0:
+                    continue
+
+                start_idx_m = global_dist_m
+                end_idx_m = global_dist_m + slice_m
+                
+                delta_h = 0.0
+                if elevation_values_m and len(elevation_values_m) > 1 and leg_elevation_interval_m > 0:
+                    max_idx = len(elevation_values_m) - 1
+                    start_idx = min(max_idx, max(0, int(round(start_idx_m / leg_elevation_interval_m))))
+                    end_idx = min(max_idx, max(0, int(round(end_idx_m / leg_elevation_interval_m))))
+                    delta_h = float(elevation_values_m[end_idx] - elevation_values_m[start_idx])
+
+                slice_dur_sec = (slice_m / maneuver_dist_m) * maneuver_dur_sec if maneuver_dist_m > 0 else 0
+
+                segments.append({
                     "begin_shape_index": begin_shape_index,
                     "end_shape_index": end_shape_index,
-                    "distance_km": distance_segment_km,
-                    "duration_sec": duration_segment_sec,
+                    "distance_km": slice_m / 1000.0,
+                    "duration_sec": slice_dur_sec,
                     "speed_kmh": speed_kmh,
-                    "delta_h_m": delta_h_m,
+                    "delta_h_m": delta_h,
                     "segment_kwh": 0.0,
-                    "instruction": str(maneuver.get("instruction", "")),
-                }
-            )
-            leg_distance_cursor_km += distance_segment_km
+                    "instruction": instruction
+                })
+                
+                global_dist_m += slice_m
 
     return {
         "distance_km": distance_km,
@@ -314,17 +277,7 @@ def get_valhalla_route(
     endpoint: str = VALHALLA_ROUTE_URL,
     timeout_seconds: int = VALHALLA_TIMEOUT_SECONDS,
 ) -> Dict[str, object]:
-    """Berechnet eine Route von A nach B über die Valhalla API.
-
-    Args:
-        start_coords: Dict {'lon','lat'} oder [lon, lat]
-        end_coords: Dict {'lon','lat'} oder [lon, lat]
-        endpoint: Valhalla /route Endpoint
-        timeout_seconds: Request-Timeout
-
-    Returns:
-        Dict mit Distanz (km), Dauer (min), codierter und decodierter Geometrie.
-    """
+    """Berechnet eine Route von A nach B über die Valhalla API."""
     start = normalize_coordinate(start_coords)
     end = normalize_coordinate(end_coords)
     if not endpoint:
@@ -336,8 +289,8 @@ def get_valhalla_route(
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as exc:
-        raise ValhallaRouteError(f"Valhalla API nicht erreichbar oder Request fehlgeschlagen: {exc}") from exc
+        raise ValhallaRouteError(f"Valhalla API Error: {exc}") from exc
     except ValueError as exc:
-        raise ValhallaRouteError(f"Antwort ist kein valides JSON: {exc}") from exc
+        raise ValhallaRouteError(f"Invalid JSON: {exc}") from exc
 
     return _extract_route_data(data)
