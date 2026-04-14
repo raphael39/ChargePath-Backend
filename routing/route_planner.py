@@ -24,8 +24,7 @@ VALHALLA_TIMEOUT_SECONDS = get_env_int("VALHALLA_TIMEOUT_SECONDS", 15)
 
 TARGET_RESERVE_PERCENT = 0.10
 CHARGE_TIME_BUFFER_FACTOR = 1.15
-MIN_CHARGE_DELTA_SOC = 0.40   # Mindestens 40% SOC pro Ladestopp laden
-MAX_CHARGE_SOC = 0.80         # Nie über 80% laden
+MAX_CHARGE_SOC = 0.70
 MAX_STOPS = 25
 
 # --- HILFSFUNKTIONEN ---
@@ -157,14 +156,7 @@ def calculate_ev_route(request: RouteRequest, vehicle: VehicleSpecs) -> Dict[str
         energy_to_charger_kwh, _ = compute_route_energy_kwh(to_charger_route, vehicle, f"Zum Ladestopp {len(stops) + 1}")
         energy_at_arrival_kwh = max(0.0, available_energy_kwh - energy_to_charger_kwh)
 
-        arrival_soc = energy_at_arrival_kwh / battery_capacity
-        # Basis: Ankunfts-SOC + mindestens 40%
-        base_target_soc = arrival_soc + MIN_CHARGE_DELTA_SOC
-        # Bonus bei sehr niedrigem Akku (<20%): bis zu 15% extra, weil die unteren
-        # SOC-Bereiche schneller laden und es sich zeitlich kaum bemerkbar macht
-        low_soc_bonus = max(0.0, (0.20 - arrival_soc) / 0.20) * 0.15
-        smart_target_soc = min(base_target_soc + low_soc_bonus, MAX_CHARGE_SOC)
-        target_energy_after_charge_kwh = battery_capacity * smart_target_soc
+        target_energy_after_charge_kwh = battery_capacity * MAX_CHARGE_SOC
         required_charge_kwh = max(0.0, target_energy_after_charge_kwh - energy_at_arrival_kwh)
 
         effective_charge_kw = min(best_power_kw, vehicle.max_charge_power_kw) if best_power_kw > 0 else 0
@@ -197,7 +189,7 @@ def calculate_ev_route(request: RouteRequest, vehicle: VehicleSpecs) -> Dict[str
 
         stops.append({"lat": best_lat, "lon": best_lon})
         current_start = [best_lon, best_lat]
-        current_soc = smart_target_soc
+        current_soc = MAX_CHARGE_SOC
 
         if len(stops) >= MAX_STOPS:
             raise ValueError("Maximale Anzahl Ladestopps überschritten.")
