@@ -1,0 +1,42 @@
+# Caddy Reverse Proxy fuer RouteZero
+#
+# Caddy holt sich automatisch ein Let's-Encrypt-Zertifikat fuer die unten
+# konfigurierte Domain, sobald die DNS-A-Record stimmt. Kein manuelles
+# Certificate-Management noetig.
+#
+# Installation auf dem Server:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+
+route.chargeindex.eu {
+    # Alle Requests an den lokalen uvicorn weiterleiten
+    reverse_proxy 127.0.0.1:8000 {
+        # Headers fuer den Backend-Service, damit er die echte Client-IP
+        # statt 127.0.0.1 sieht (fuer Logging/Rate-Limiting spaeter).
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Compress
+    encode gzip zstd
+
+    # Standard-Sicherheits-Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # CORS bewusst nicht offen — die Mobile-App spricht direkt mit uns,
+        # kein Browser-CORS-Bedarf. Falls eine Web-App dazukommt, hier
+        # Access-Control-Allow-Origin nach Bedarf anpassen.
+    }
+
+    # Strukturierte Logs in /var/log/caddy/routezero.log
+    log {
+        output file /var/log/caddy/routezero.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}

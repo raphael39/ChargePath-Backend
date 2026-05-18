@@ -3,30 +3,23 @@
 from pydantic import BaseModel, Field
 
 class RouteRequest(BaseModel):
-    """Das Schema für eine eingehende Routen-Anfrage der App."""
+    # Basis-Routendaten
     start_lon: float
     start_lat: float
     dest_lon: float
     dest_lat: float
     
-    # --- NEU ---
-    # Wir fügen die vehicle_id hinzu. Wenn die iOS-App nichts mitschickt, 
-    # fällt FastAPI automatisch auf unser "generic_ev" zurück.
-    vehicle_id: str = Field(
-        default="tesla_model_3_lr", 
-        description="Die ID des Fahrzeugs aus der internen Datenbank (z.B. 'tesla_model_y_lr')"
-    )
+    # Fahrzeug & Start-Akku
+    vehicle_id: str = Field(default="tesla_model_3_lr")
+    initial_soc: float = Field(default=1.0, ge=0.01, le=1.0)
 
-    # --- NEU: Start-Akkustand ---
-    initial_soc: float = Field(
-        default=1.0, 
-        ge=0.01,  # Greater than or equal to 1% (Schutz vor "Auto ist schon leer")
-        le=1.0,   # Less than or equal to 100%
-        description="Akkustand beim Start der Route (0.01 bis 1.0). Standard ist 1.0 (100%)."
-    )
-
-    # --- NEU: Der Geizfaktor aus der App ---
-    price_time_weight: float | None = Field(
-        default=None, 
-        description="Faktor: 1 Euro Aufpreis = X Minuten Schmerz. Überschreibt die .env, falls gesetzt."
-    )
+    # --- Erweiterte Routen-Parameter aus dem Frontend-Menü ---
+    target_soc: float = Field(default=0.10, description="Gewünschter SoC am finalen Ziel")
+    window_start_soc: float = Field(default=0.20, description="Ab diesem SoC Ladesäulen suchen")
+    window_end_soc: float = Field(default=0.05, description="Späteste Ankunft am Lader (Reserve)")
+    
+    price_time_weight: float | None = Field(default=3.0, description="1 Euro Aufpreis = X Minuten Schmerz")
+    
+    consumption_factor: float = Field(default=1.0, description="Verbrauchsmultiplikator (z.B. 1.1 für +10%)")
+    speed_factor: float = Field(default=1.0, description="Geschwindigkeitsmultiplikator")
+    degradation: float = Field(default=0.0, description="Batterie-Degradation (z.B. 0.05 für 5%)")

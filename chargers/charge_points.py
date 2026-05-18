@@ -19,13 +19,10 @@ def parse_usage_cost(cost_str: str) -> float | None:
     
     cost_lower = cost_str.lower()
 
-    # 1. ist es kostenlos?
-    if "free" in cost_lower or "kostenlos" or "gratis" in cost_lower:
+    if "free" in cost_lower or "kostenlos" in cost_lower or "gratis" in cost_lower:
         return 0.0
     
-    # 2. suchen nach einer kommazahl
-    match = re.search(r"(\d+[.,]\d+)",cost_str)
-
+    match = re.search(r"(\d+[.,]\d+)", cost_str)
     if match:
         number_str = match.group(1).replace(",",".")
         try:
@@ -33,9 +30,7 @@ def parse_usage_cost(cost_str: str) -> float | None:
         except ValueError:
             return None
         
-    # 3. Falls es nur eine glatte Zahl ist (z.b: 1)
-    match_int = re.search(r"(\d+)",cost_str)
-
+    match_int = re.search(r"(\d+)", cost_str)
     if match_int:
         return float(match_int.group(1))
     
@@ -50,26 +45,22 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-import os
-from typing import Dict, List, Tuple
 
 def find_charging_window(
     decoded_shape: List[List[float]],
     segments: List[Dict[str, object]],
     battery_capacity_kwh: float,
     current_soc: float,
+    window_start_soc: float, # <-- NEU vom Frontend
+    window_end_soc: float    # <-- NEU vom Frontend
 ) -> Tuple[List[List[float]], float, float]:
-    """Findet das Ladefenster mit präziser Interpolation aus der .env Konfiguration."""
-    
-    # Werte aus der .env laden (Fallback auf 20% und 4%, falls nicht gefunden)
-    soc_window_start = float(os.getenv("SOC_WINDOW_START", "0.20"))
-    soc_window_end = float(os.getenv("SOC_WINDOW_END", "0.04"))
+    """Findet das Ladefenster mit präziser Interpolation aus den Frontend-Settings."""
     
     current_energy_kwh = battery_capacity_kwh * current_soc
     
     # Ab wie viel VERBRAUCHTEN kWh geht das Fenster auf und zu?
-    consumed_kwh_for_window_start = current_energy_kwh - (battery_capacity_kwh * soc_window_start)
-    consumed_kwh_for_window_end = current_energy_kwh - (battery_capacity_kwh * soc_window_end)
+    consumed_kwh_for_window_start = current_energy_kwh - (battery_capacity_kwh * window_start_soc)
+    consumed_kwh_for_window_end = current_energy_kwh - (battery_capacity_kwh * window_end_soc)
     
     accumulated_kwh = 0.0
     accumulated_km = 0.0
@@ -107,7 +98,7 @@ def find_charging_window(
     if window_start_km is None or window_end_km is None:
         return [], 0.0, 0.0
 
-    # 2. Maßband anlegen (bleibt gleich wie bei dir)
+    # 2. Maßband anlegen
     window_coords = []
     current_shape_km = 0.0
     
@@ -115,7 +106,6 @@ def find_charging_window(
         lat1, lon1 = decoded_shape[i]
         lat2, lon2 = decoded_shape[i+1]
         
-        # Gehe davon aus, dass _haversine_km bei dir definiert ist
         dist = _haversine_km(lat1, lon1, lat2, lon2) 
         
         if current_shape_km + dist >= window_start_km and current_shape_km <= window_end_km:
@@ -141,14 +131,8 @@ def get_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> int:
     return int((math.degrees(math.atan2(x, y)) + 360) % 360)
 
 def get_bounding_box(coords: List[List[float]], buffer_deg: float = 0.05) -> Tuple[float, float, float, float]:
-    """
-    Erstellt die Box und bläst sie um 0.05 Grad (ca. 5 Kilometer) in alle 
-    Himmelsrichtungen auf, damit wir auch Autohöfe neben der Autobahn erwischen.
-    """
     lats = [c[0] for c in coords]
     lons = [c[1] for c in coords]
-    
-    # NEU: Wir addieren/subtrahieren den Puffer
     return min(lats) - buffer_deg, min(lons) - buffer_deg, max(lats) + buffer_deg, max(lons) + buffer_deg
 
 def is_within_window_radius(lat: float, lon: float, window_coords: List[List[float]], radius_km: float = 3.0) -> bool:
@@ -159,8 +143,6 @@ def is_within_window_radius(lat: float, lon: float, window_coords: List[List[flo
 
 def find_chargers(bounding_box: Tuple[float, float, float, float]) -> List[Dict[str, object]]:
     min_lat, min_lon, max_lat, max_lon = bounding_box
-    
-    # NEU: Das exakte Format (Top-Left), (Bottom-Right), das OCM verlangt!
     bbox_string = f"({max_lat},{min_lon}),({min_lat},{max_lon})"
     
     params = {

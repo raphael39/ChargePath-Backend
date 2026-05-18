@@ -8,4 +8,27 @@ __pycache__/
 
 # Mac OS Systemdateien
 .DS_Store
-EOT
+
+# HTTP-Cache (requests-cache SQLite)
+.cache/
+
+# Debug-Karten aus dem Route-Planner
+debug_map_stop_*.html
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code Worktrees / Session-Daten
+.claude/
+
+# Python virtualenv und test-Caches
+.venv/
+venv/
+.pytest_cache/
+
+# Logs
+*.log
+logs/

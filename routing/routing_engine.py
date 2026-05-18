@@ -35,6 +35,12 @@ def compute_route_energy_kwh(
         speed_kmh = float(segment.get("speed_kmh", 0.0))
         duration_sec = float(segment.get("duration_sec", 0.0))
         delta_h_m = float(segment.get("delta_h_m", 0.0))
+        # Neue Felder: profil-aufgeloeste Hoehenenergie. Falls aus aelterem
+        # Code-Pfad nicht vorhanden -> None -> Physik faellt auf Netto-Approximation zurueck.
+        gain_raw = segment.get("elevation_gain_m")
+        loss_raw = segment.get("elevation_loss_m")
+        elevation_gain_m = float(gain_raw) if gain_raw is not None else None
+        elevation_loss_m = float(loss_raw) if loss_raw is not None else None
 
         # Anti-Geister-Segment-Filter (verhindert Vollbremsungen an Kreuzungen)
         if distance_km <= 0.001 or duration_sec <= 0:
@@ -45,7 +51,9 @@ def compute_route_energy_kwh(
             speed_kmh=speed_kmh,
             duration_sec=duration_sec,
             delta_h_m=delta_h_m,
-            initial_speed_kmh=previous_speed_kmh
+            initial_speed_kmh=previous_speed_kmh,
+            elevation_gain_m=elevation_gain_m,
+            elevation_loss_m=elevation_loss_m,
         )
         
         segment["segment_kwh"] = segment_kwh
